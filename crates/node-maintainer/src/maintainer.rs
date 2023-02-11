@@ -174,7 +174,7 @@ impl NodeMaintainer {
                     Ok::<_, NodeMaintainerError>(())
                 }
             })
-            .buffered(300)
+            .buffer_unordered(1000)
             .try_for_each(|_| futures::future::ready(Ok(())));
 
         let graph_mutex = graph_mutex_copy;
@@ -252,7 +252,7 @@ impl NodeMaintainer {
                     Ok::<(), NodeMaintainerError>(())
                 }
             })
-            .buffered(300)
+            .buffered(1000)
             .try_for_each(|_| futures::future::ready(Ok(())));
 
         let (a, b) = futures::future::join(traverser, resolver).await;
