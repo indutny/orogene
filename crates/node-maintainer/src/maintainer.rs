@@ -149,6 +149,7 @@ impl NodeMaintainer {
                     let nassun = nassun.clone();
 
                     let package = nassun.resolve(name).await?;
+                    // println!("  downloaded {:?}", package.name());
 
                     let mut graph = graph_mutex.lock().await;
                     let in_flight = in_flight.clone();
@@ -166,7 +167,6 @@ impl NodeMaintainer {
                             resolve_sender.close_channel();
                         }
                     } else {
-                        // println!("  scheduling {:?}", package.name());
                         let child_idx =
                             Self::place_child(&mut graph, dependent_idx, package, dep_type)?;
                         idx_sender.unbounded_send(child_idx)?;
@@ -226,6 +226,7 @@ impl NodeMaintainer {
                         // Otherwise, we have to fetch package metadata to
                         // create a new node (which we'll place later).
                         in_flight.fetch_add(1, atomic::Ordering::SeqCst);
+                        // println!("  scheduled {:?}@{:?}", name, spec);
                         to_resolve.push((
                             format!("{name}@{spec}"),
                             requested,
@@ -242,9 +243,10 @@ impl NodeMaintainer {
 
                     if in_flight.fetch_sub(1, atomic::Ordering::SeqCst) == 1 {
                         idx_sender.close_channel();
+                        resolve_sender.close_channel();
                     }
 
-                    // println!("end {:?}", graph[node_idx].package.name());
+                    // println!("end");
                     Ok::<(), NodeMaintainerError>(())
                 }
             })
