@@ -134,7 +134,7 @@ impl NodeMaintainer {
                 let mut graph = graph.lock().await;
                 let nassun = nassun.clone();
                 let mut names = HashSet::new();
-                let mut packages = Vec::new();
+                let mut packages = futures::stream::FuturesUnordered::new();
                 let manifest = graph[node_idx].package.corgi_metadata().await?.manifest;
 
                 // Grab all the deps from the current package and fire off a
@@ -175,13 +175,6 @@ impl NodeMaintainer {
         packages
             // Unwrap `once()` from the `map` above.
             .flatten()
-            .map_ok(|packages| {
-                futures::stream::iter(
-                    // Each package is a Future<Result>
-                    packages.into_iter().map(|spec| futures::stream::once(spec)),
-                )
-                .flatten()
-            })
             // Unwrap `stream::iter()` into `Stream<Result<package_tuple>>`
             .try_flatten()
             .try_for_each(move |(package, requested, dep_type, dependent_idx)| {
