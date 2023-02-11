@@ -7,8 +7,6 @@ use petgraph::stable_graph::{EdgeIndex, NodeIndex};
 use ssri::Integrity;
 use unicase::UniCase;
 
-use crate::Graph;
-
 #[derive(Debug)]
 pub struct Node {
     /// Index of this Node inside its [`Graph`].
@@ -40,17 +38,6 @@ impl Node {
             dependencies: HashMap::new(),
             resolved_metadata: ResolvedMetadata::default(),
         }
-    }
-
-    /// This Node's depth in the logical filesystem hierarchy.
-    pub(crate) fn depth(&self, graph: &Graph) -> usize {
-        let mut depth = 0;
-        let mut current = self.parent;
-        while let Some(idx) = current {
-            depth += 1;
-            current = graph.inner[idx].parent;
-        }
-        depth
     }
 }
 

@@ -68,4 +68,9 @@ pub enum NodeMaintainerError {
     #[error("{0}")]
     #[diagnostic(code(node_maintainer::miscellaneous_error))]
     MiscError(String),
+
+    /// TODO indutny
+    #[error("Failed to parse a Semver string.")]
+    #[diagnostic(code(node_maintainer::kdl::io_error))]
+    TrySendError(#[from] futures::channel::mpsc::TrySendError<petgraph::stable_graph::NodeIndex>),
 }
