@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -124,17 +125,25 @@ impl NodeMaintainer {
         let (idx_sender, idx_receiver) = futures::channel::mpsc::unbounded::<NodeIndex>();
         idx_sender.unbounded_send(self.graph.root)?;
 
+        // Root is in flight
+        let in_flight = Arc::new(AtomicUsize::new(1));
+
         let graph = Arc::new(Mutex::new(&mut self.graph));
         let nassun = Arc::new(&self.nassun);
         let graph_copy = graph.clone();
+        let idx_sender_copy = idx_sender.clone();
+        let in_flight_copy = in_flight.clone();
         let packages = idx_receiver.map(move |node_idx| {
             let graph = graph.clone();
+            let idx_sender = idx_sender.clone();
+            let in_flight = in_flight.clone();
             let nassun = nassun.clone();
             futures::stream::once(async move {
                 let mut graph = graph.lock().await;
+                let in_flight = in_flight.clone();
                 let nassun = nassun.clone();
                 let mut names = HashSet::new();
-                let mut packages = futures::stream::FuturesUnordered::new();
+                let packages = futures::stream::FuturesUnordered::new();
                 let manifest = graph[node_idx].package.corgi_metadata().await?.manifest;
 
                 // Grab all the deps from the current package and fire off a
@@ -162,10 +171,15 @@ impl NodeMaintainer {
 
                     // Otherwise, we have to fetch package metadata to
                     // create a new node (which we'll place later).
+                    in_flight.fetch_add(1, Ordering::SeqCst);
                     packages.push(nassun.resolve(format!("{name}@{spec}")).map(move |p| {
                         Ok::<_, NodeMaintainerError>((p?, requested, dep_type, node_idx))
                     }));
                     names.insert(name);
+                }
+
+                if in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    idx_sender.close_channel();
                 }
 
                 Ok::<_, NodeMaintainerError>(packages)
@@ -177,27 +191,36 @@ impl NodeMaintainer {
             .flatten()
             // Unwrap `stream::iter()` into `Stream<Result<package_tuple>>`
             .try_flatten()
-            .try_for_each(move |(package, requested, dep_type, dependent_idx)| {
-                let graph = graph_copy.clone();
-                let idx_sender = idx_sender.clone();
-                async move {
-                    let mut graph = graph.lock().await;
-                    let name = UniCase::new(package.name().to_string());
-                    let satisfies = Self::satisfy_dependency(
-                        &mut graph,
-                        dependent_idx,
-                        &dep_type,
-                        &name,
-                        &requested,
-                    )?;
-                    if !satisfies {
-                        let child_idx =
-                            Self::place_child(&mut graph, dependent_idx, package, dep_type)?;
-                        idx_sender.unbounded_send(child_idx)?;
+            .try_for_each_concurrent(
+                3000,
+                move |(package, requested, dep_type, dependent_idx)| {
+                    let graph = graph_copy.clone();
+                    let idx_sender = idx_sender_copy.clone();
+                    let in_flight = in_flight_copy.clone();
+                    async move {
+                        let mut graph = graph.lock().await;
+                        let in_flight = in_flight.clone();
+                        let name = UniCase::new(package.name().to_string());
+                        let satisfies = Self::satisfy_dependency(
+                            &mut graph,
+                            dependent_idx,
+                            &dep_type,
+                            &name,
+                            &requested,
+                        )?;
+                        if satisfies {
+                            if in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                idx_sender.close_channel();
+                            }
+                        } else {
+                            let child_idx =
+                                Self::place_child(&mut graph, dependent_idx, package, dep_type)?;
+                            idx_sender.unbounded_send(child_idx)?;
+                        }
+                        Ok(())
                     }
-                    Ok(())
-                }
-            })
+                },
+            )
             .await?;
 
         Ok(())
