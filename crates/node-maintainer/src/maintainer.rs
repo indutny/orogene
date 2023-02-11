@@ -7,7 +7,7 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use async_std::fs;
 use futures::lock::Mutex;
-use futures::{FutureExt, SinkExt, StreamExt, TryStreamExt};
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use kdl::KdlDocument;
 use nassun::{Nassun, NassunOpts, Package, PackageSpec};
 use oro_common::CorgiManifest;
@@ -144,7 +144,7 @@ impl NodeMaintainer {
                 let in_flight = in_flight.clone();
                 let graph_mutex = graph_mutex.clone();
                 let nassun = nassun.clone();
-                let mut resolve_sender = resolve_sender_copy.clone();
+                let resolve_sender = resolve_sender_copy.clone();
                 async move {
                     let nassun = nassun.clone();
 
@@ -181,7 +181,7 @@ impl NodeMaintainer {
         let in_flight = in_flight_copy;
         let idx_sender = idx_sender_copy;
         let traverser = idx_receiver
-            .map(move |node_idx| {
+            .map(|node_idx| {
                 let graph_mutex = graph_mutex.clone();
                 let in_flight = in_flight.clone();
                 let idx_sender = idx_sender.clone();
@@ -195,7 +195,7 @@ impl NodeMaintainer {
                     // println!("start {:?}", graph[node_idx].package.name());
                     let manifest = graph[node_idx].package.corgi_metadata().await?.manifest;
 
-                    let mut resolve_sender = resolve_sender.clone();
+                    let resolve_sender = resolve_sender.clone();
 
                     let mut to_resolve = Vec::new();
 
