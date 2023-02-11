@@ -127,7 +127,7 @@ impl NodeMaintainer {
         idx_sender.unbounded_send(self.graph.root)?;
 
         let (resolve_sender, resolve_receiver) =
-            futures::channel::mpsc::channel::<(String, PackageSpec, DepType, NodeIndex)>(100);
+            futures::channel::mpsc::unbounded::<(String, PackageSpec, DepType, NodeIndex)>();
 
         // Root node is in flight
         let in_flight = Arc::new(atomic::AtomicUsize::new(1));
@@ -174,8 +174,8 @@ impl NodeMaintainer {
                     Ok::<_, NodeMaintainerError>(())
                 }
             })
-            .buffer_unordered(300)
-            .try_for_each_concurrent(None, |_| futures::future::ready(Ok(())));
+            .buffered(300)
+            .try_for_each(|_| futures::future::ready(Ok(())));
 
         let graph_mutex = graph_mutex_copy;
         let in_flight = in_flight_copy;
@@ -235,10 +235,12 @@ impl NodeMaintainer {
                         ));
                         names.insert(name);
                     }
+
+                    // Release mutex so that code below doesn't dead lock
                     drop(graph);
 
                     for tuple in to_resolve {
-                        resolve_sender.send(tuple).await?;
+                        resolve_sender.unbounded_send(tuple)?;
                     }
 
                     if in_flight.fetch_sub(1, atomic::Ordering::SeqCst) == 1 {
@@ -250,8 +252,8 @@ impl NodeMaintainer {
                     Ok::<(), NodeMaintainerError>(())
                 }
             })
-            .buffer_unordered(300)
-            .try_for_each_concurrent(None, |_| futures::future::ready(Ok(())));
+            .buffered(300)
+            .try_for_each(|_| futures::future::ready(Ok(())));
 
         let (a, b) = futures::future::join(traverser, resolver).await;
         a?;

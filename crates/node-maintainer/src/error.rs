@@ -1,3 +1,4 @@
+use crate::edge::DepType;
 use kdl::{KdlDocument, KdlNode};
 use miette::Diagnostic;
 use thiserror::Error;
@@ -77,5 +78,13 @@ pub enum NodeMaintainerError {
     /// TODO indutny
     #[error("Failed to parse a Semver string.")]
     #[diagnostic(code(node_maintainer::kdl::io_error))]
-    SendError(#[from] futures::channel::mpsc::SendError),
+    TrySendError2(
+        #[from]
+        futures::channel::mpsc::TrySendError<(
+            String,
+            nassun::PackageSpec,
+            DepType,
+            petgraph::stable_graph::NodeIndex,
+        )>,
+    ),
 }
