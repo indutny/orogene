@@ -137,12 +137,14 @@ impl NodeMaintainer {
         let graph_mutex_copy = graph_mutex.clone();
         let in_flight_copy = in_flight.clone();
         let idx_sender_copy = idx_sender.clone();
+        let resolve_sender_copy = resolve_sender.clone();
         let resolver = resolve_receiver
             .map(|(name, requested, dep_type, dependent_idx)| {
                 let idx_sender = idx_sender.clone();
                 let in_flight = in_flight.clone();
                 let graph_mutex = graph_mutex.clone();
                 let nassun = nassun.clone();
+                let mut resolve_sender = resolve_sender_copy.clone();
                 async move {
                     let nassun = nassun.clone();
 
@@ -161,6 +163,7 @@ impl NodeMaintainer {
                     if satisfies {
                         if in_flight.fetch_sub(1, atomic::Ordering::SeqCst) == 1 {
                             idx_sender.close_channel();
+                            resolve_sender.close_channel();
                         }
                     } else {
                         // println!("  scheduling {:?}", package.name());
@@ -177,7 +180,6 @@ impl NodeMaintainer {
         let graph_mutex = graph_mutex_copy;
         let in_flight = in_flight_copy;
         let idx_sender = idx_sender_copy;
-        let mut resolve_sender_copy = resolve_sender.clone();
         let traverser = idx_receiver
             .map(move |node_idx| {
                 let graph_mutex = graph_mutex.clone();
@@ -232,6 +234,7 @@ impl NodeMaintainer {
                         ));
                         names.insert(name);
                     }
+                    drop(graph);
 
                     for tuple in to_resolve {
                         resolve_sender.send(tuple).await?;
@@ -246,11 +249,7 @@ impl NodeMaintainer {
                 }
             })
             .buffer_unordered(300)
-            .try_for_each_concurrent(None, |_| futures::future::ready(Ok(())))
-            .map(move |r| {
-                resolve_sender_copy.close_channel();
-                r
-            });
+            .try_for_each_concurrent(None, |_| futures::future::ready(Ok(())));
 
         let (a, b) = futures::future::join(traverser, resolver).await;
         a?;
