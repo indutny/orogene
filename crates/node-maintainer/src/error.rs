@@ -73,7 +73,7 @@ pub enum NodeMaintainerError {
     /// TODO indutny
     #[error("Failed to parse a Semver string.")]
     #[diagnostic(code(node_maintainer::kdl::io_error))]
-    TrySendError(#[from] futures::channel::mpsc::TrySendError<petgraph::stable_graph::NodeIndex>),
+    TrySendError(#[from] futures::channel::mpsc::TrySendError<()>),
 
     /// TODO indutny
     #[error("Failed to parse a Semver string.")]

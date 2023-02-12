@@ -123,8 +123,13 @@ impl NodeMaintainer {
     }
 
     async fn run_resolver_new(&mut self) -> Result<(), NodeMaintainerError> {
-        let (idx_sender, idx_receiver) = futures::channel::mpsc::unbounded::<NodeIndex>();
-        idx_sender.unbounded_send(self.graph.root)?;
+        let (idx_sender, idx_receiver) = futures::channel::mpsc::unbounded::<()>();
+
+        let mut q = VecDeque::new();
+        q.push_back(self.graph.root);
+        idx_sender.unbounded_send(())?;
+
+        let q = Arc::new(Mutex::new(q));
 
         let (resolve_sender, resolve_receiver) =
             futures::channel::mpsc::unbounded::<(String, PackageSpec, DepType, NodeIndex)>();
@@ -137,8 +142,8 @@ impl NodeMaintainer {
         let graph_mutex_copy = graph_mutex.clone();
         let in_flight_copy = in_flight.clone();
         let idx_sender_copy = idx_sender.clone();
-        let idx_sender_copy_2 = idx_sender.clone();
         let resolve_sender_copy = resolve_sender.clone();
+        let q_copy = q.clone();
         let resolver = resolve_receiver
             .map(|(name, requested, dep_type, dependent_idx)| {
                 let idx_sender = idx_sender.clone();
@@ -146,6 +151,7 @@ impl NodeMaintainer {
                 let graph_mutex = graph_mutex.clone();
                 let nassun = nassun.clone();
                 let resolve_sender = resolve_sender_copy.clone();
+                let q = q.clone();
                 async move {
                     let nassun = nassun.clone();
 
@@ -164,47 +170,63 @@ impl NodeMaintainer {
                         &name,
                         &requested,
                     )?;
-                    let maybe_idx = if satisfies {
+                    if satisfies {
                         if in_flight.fetch_sub(1, atomic::Ordering::SeqCst) == 1 {
                             idx_sender.close_channel();
                             resolve_sender.close_channel();
                         }
-                        None
                     } else {
                         let child_idx =
                             Self::place_child(&mut graph, dependent_idx, package, dep_type)?;
-                        Some(child_idx)
-                    };
-                    Ok::<_, NodeMaintainerError>(maybe_idx)
+
+                        let mut q = q.lock().await;
+
+                        q.push_back(child_idx);
+
+                        // We sort the current queue so we consider more shallow
+                        // dependencies first, and we also sort alphabetically.
+                        q.make_contiguous().sort_by(|a_idx, b_idx| {
+                            let a = &graph[*a_idx];
+                            let b = &graph[*b_idx];
+                            match a.depth(&graph).cmp(&b.depth(&graph)) {
+                                Ordering::Equal => a.package.name().cmp(b.package.name()),
+                                other => other,
+                            }
+                        });
+
+                        drop(q);
+                        idx_sender.unbounded_send(())?;
+                    }
+                    Ok::<_, NodeMaintainerError>(())
                 }
             })
-            .buffered(100)
-            .try_for_each(|maybe_idx| {
-                let idx_sender = idx_sender_copy_2.clone();
-                async move {
-                    if let Some(child_idx) = maybe_idx {
-                        idx_sender.unbounded_send(child_idx)?;
-                    }
-                    Ok(())
-                }
-            });
+            .buffer_unordered(100)
+            .try_for_each(|_| futures::future::ready(Ok(())));
 
         let graph_mutex = graph_mutex_copy;
         let in_flight = in_flight_copy;
         let idx_sender = idx_sender_copy;
+        let q = q_copy;
         let traverser = idx_receiver
-            .map(|node_idx| {
+            .map(|_| {
                 let graph_mutex = graph_mutex.clone();
                 let in_flight = in_flight.clone();
                 let idx_sender = idx_sender.clone();
                 let resolve_sender = resolve_sender.clone();
+                let q = q.clone();
 
                 async move {
+                    let node_idx = q.lock().await.pop_front().unwrap();
+
                     let graph_mutex = graph_mutex.clone();
                     let mut graph = graph_mutex.lock().await;
                     let in_flight = in_flight.clone();
                     let mut names = HashSet::new();
-                    // println!("start {:?}", graph[node_idx].package.name());
+                    /* println!(
+                        "start {:?} {:?}",
+                        graph[node_idx].package.name(),
+                        graph[node_idx].depth(&graph)
+                    ); */
                     let manifest = graph[node_idx].package.corgi_metadata().await?.manifest;
 
                     let resolve_sender = resolve_sender.clone();
@@ -264,7 +286,7 @@ impl NodeMaintainer {
                     Ok::<(), NodeMaintainerError>(())
                 }
             })
-            .buffered(100)
+            .buffered(1)
             .try_for_each(|_| futures::future::ready(Ok(())));
 
         let (a, b) = futures::future::join(traverser, resolver).await;
