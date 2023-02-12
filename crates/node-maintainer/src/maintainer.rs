@@ -7,7 +7,7 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use async_std::fs;
 use futures::lock::Mutex;
-use futures::{FutureExt, StreamExt, TryStreamExt};
+use futures::{StreamExt, TryStreamExt};
 use kdl::KdlDocument;
 use nassun::{Nassun, NassunOpts, Package, PackageSpec};
 use oro_common::CorgiManifest;
@@ -59,7 +59,7 @@ impl NodeMaintainerOptions {
             let nassun = me.nassun_opts.build();
             let graph = Lockfile::from_kdl(kdl)?.into_graph(&nassun).await?;
             let mut nm = NodeMaintainer { nassun, graph };
-            nm.run_resolver_new().await?;
+            nm.run_resolver().await?;
             Ok(nm)
         }
         inner(self, kdl.into_kdl()?).await
@@ -77,7 +77,7 @@ impl NodeMaintainerOptions {
         };
         let node = nm.graph.inner.add_node(Node::new(package));
         nm.graph[node].root = node;
-        nm.run_resolver_new().await?;
+        nm.run_resolver().await?;
         Ok(nm)
     }
 }
@@ -122,7 +122,7 @@ impl NodeMaintainer {
         self.graph.render()
     }
 
-    async fn run_resolver_new(&mut self) -> Result<(), NodeMaintainerError> {
+    async fn run_resolver(&mut self) -> Result<(), NodeMaintainerError> {
         let (idx_sender, idx_receiver) = futures::channel::mpsc::unbounded::<()>();
 
         let mut q = VecDeque::new();
@@ -155,10 +155,7 @@ impl NodeMaintainer {
                 async move {
                     let nassun = nassun.clone();
 
-                    let tmp = name.clone();
-                    // println!("  downloading {:?}", tmp);
                     let package = nassun.resolve(name).await?;
-                    // println!("  downloaded {:?}", tmp);
 
                     let mut graph = graph_mutex.lock().await;
                     let in_flight = in_flight.clone();
@@ -222,11 +219,6 @@ impl NodeMaintainer {
                     let mut graph = graph_mutex.lock().await;
                     let in_flight = in_flight.clone();
                     let mut names = HashSet::new();
-                    /* println!(
-                        "start {:?} {:?}",
-                        graph[node_idx].package.name(),
-                        graph[node_idx].depth(&graph)
-                    ); */
                     let manifest = graph[node_idx].package.corgi_metadata().await?.manifest;
 
                     let resolve_sender = resolve_sender.clone();
@@ -260,7 +252,6 @@ impl NodeMaintainer {
                         // Otherwise, we have to fetch package metadata to
                         // create a new node (which we'll place later).
                         in_flight.fetch_add(1, atomic::Ordering::SeqCst);
-                        // println!("  scheduled {:?}@{:?}", name, spec);
                         to_resolve.push((
                             format!("{name}@{spec}"),
                             requested,
@@ -282,7 +273,6 @@ impl NodeMaintainer {
                         resolve_sender.close_channel();
                     }
 
-                    // println!("end");
                     Ok::<(), NodeMaintainerError>(())
                 }
             })
@@ -293,94 +283,6 @@ impl NodeMaintainer {
         a?;
         b?;
 
-        Ok(())
-    }
-
-    async fn run_resolver_old(&mut self) -> Result<(), NodeMaintainerError> {
-        let mut package_groups = Vec::new();
-        let mut q = VecDeque::new();
-        q.push_back(self.graph.root);
-        // Start iterating over the queue. We'll be adding things to it as we find them.
-        while !q.is_empty() {
-            while let Some(node_idx) = q.pop_front() {
-                let mut names = HashSet::new();
-                let mut packages = Vec::new();
-                let manifest = self.graph[node_idx]
-                    .package
-                    .corgi_metadata()
-                    .await?
-                    .manifest;
-                // Grab all the deps from the current package and fire off a
-                // lookup. These will be resolved concurrently.
-                for ((name, spec), dep_type) in Self::package_deps(&self.graph, node_idx, &manifest)
-                {
-                    // `dependencies` > `optionalDependencies` ->
-                    // `peerDependencies` -> `devDependencies` (if we're looking
-                    // at root)
-                    let name = UniCase::new(name.clone());
-                    if !names.contains(&name) {
-                        let requested = format!("{name}@{spec}").parse()?;
-                        // Walk up the current hierarchy to see if we find a
-                        // dependency that already satisfies this request. If so,
-                        // make a new edge and move on.
-                        if !Self::satisfy_dependency(
-                            &mut self.graph,
-                            node_idx,
-                            &dep_type,
-                            &name,
-                            &requested,
-                        )? {
-                            // Otherwise, we have to fetch package metadata to
-                            // create a new node (which we'll place later).
-                            packages.push(
-                                self.nassun
-                                    .resolve(format!("{name}@{spec}"))
-                                    .map(move |p| (p, requested, dep_type, node_idx)),
-                            );
-                        };
-                        names.insert(name);
-                    }
-                }
-
-                package_groups.push(futures::stream::iter(packages));
-            }
-
-            // Order doesn't matter here: each node name is unique, so we
-            // don't have to worry about races messing with placement.
-            let mut stream = futures::stream::iter(package_groups.drain(..))
-                .flatten()
-                .buffer_unordered(30);
-            while let Some((package, requested, dep_type, dependent_idx)) = stream.next().await {
-                let package = package?;
-                let name = UniCase::new(package.name().to_string());
-                if Self::satisfy_dependency(
-                    &mut self.graph,
-                    dependent_idx,
-                    &dep_type,
-                    &name,
-                    &requested,
-                )? {
-                    continue;
-                }
-                q.push_back(Self::place_child(
-                    &mut self.graph,
-                    dependent_idx,
-                    package,
-                    dep_type,
-                )?);
-            }
-
-            // We sort the current queue so we consider more shallow
-            // dependencies first, and we also sort alphabetically.
-            q.make_contiguous().sort_by(|a_idx, b_idx| {
-                let a = &self.graph[*a_idx];
-                let b = &self.graph[*b_idx];
-                match a.depth(&self.graph).cmp(&b.depth(&self.graph)) {
-                    Ordering::Equal => a.package.name().cmp(b.package.name()),
-                    other => other,
-                }
-            })
-        }
         Ok(())
     }
 
