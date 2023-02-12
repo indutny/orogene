@@ -137,6 +137,7 @@ impl NodeMaintainer {
         let graph_mutex_copy = graph_mutex.clone();
         let in_flight_copy = in_flight.clone();
         let idx_sender_copy = idx_sender.clone();
+        let idx_sender_copy_2 = idx_sender.clone();
         let resolve_sender_copy = resolve_sender.clone();
         let resolver = resolve_receiver
             .map(|(name, requested, dep_type, dependent_idx)| {
@@ -148,8 +149,10 @@ impl NodeMaintainer {
                 async move {
                     let nassun = nassun.clone();
 
+                    let tmp = name.clone();
+                    // println!("  downloading {:?}", tmp);
                     let package = nassun.resolve(name).await?;
-                    // println!("  downloaded {:?}", package.name());
+                    // println!("  downloaded {:?}", tmp);
 
                     let mut graph = graph_mutex.lock().await;
                     let in_flight = in_flight.clone();
@@ -161,21 +164,30 @@ impl NodeMaintainer {
                         &name,
                         &requested,
                     )?;
-                    if satisfies {
+                    let maybe_idx = if satisfies {
                         if in_flight.fetch_sub(1, atomic::Ordering::SeqCst) == 1 {
                             idx_sender.close_channel();
                             resolve_sender.close_channel();
                         }
+                        None
                     } else {
                         let child_idx =
                             Self::place_child(&mut graph, dependent_idx, package, dep_type)?;
-                        idx_sender.unbounded_send(child_idx)?;
-                    }
-                    Ok::<_, NodeMaintainerError>(())
+                        Some(child_idx)
+                    };
+                    Ok::<_, NodeMaintainerError>(maybe_idx)
                 }
             })
-            .buffer_unordered(1000)
-            .try_for_each(|_| futures::future::ready(Ok(())));
+            .buffered(100)
+            .try_for_each(|maybe_idx| {
+                let idx_sender = idx_sender_copy_2.clone();
+                async move {
+                    if let Some(child_idx) = maybe_idx {
+                        idx_sender.unbounded_send(child_idx)?;
+                    }
+                    Ok(())
+                }
+            });
 
         let graph_mutex = graph_mutex_copy;
         let in_flight = in_flight_copy;
@@ -252,7 +264,7 @@ impl NodeMaintainer {
                     Ok::<(), NodeMaintainerError>(())
                 }
             })
-            .buffered(1000)
+            .buffered(100)
             .try_for_each(|_| futures::future::ready(Ok(())));
 
         let (a, b) = futures::future::join(traverser, resolver).await;
