@@ -1,9 +1,10 @@
 use std::cmp::Ordering;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashSet, HashMap, VecDeque};
 use std::path::Path;
 
 #[cfg(not(target_arch = "wasm32"))]
 use async_std::fs;
+use async_std::sync::{Arc, Mutex};
 use futures::{TryFutureExt, StreamExt};
 use kdl::KdlDocument;
 use nassun::{Nassun, NassunOpts, Package};
@@ -111,6 +112,7 @@ impl Default for NodeMaintainerOptions {
     }
 }
 
+#[derive(Debug, Clone)]
 struct NodeDependency {
     name: UniCase<String>,
     spec: String,
@@ -170,13 +172,41 @@ impl NodeMaintainer {
         let (package_sink, package_stream) = futures::channel::mpsc::unbounded();
         let mut q = VecDeque::new();
         q.push_back(self.graph.root);
+
+        // Number of dependencies queued for processing in `package_stream`
         let mut in_flight = 0;
+
+        // Since we queue dependencies for multiple packages at once - it is
+        // not unlikely that some of them would be duplicated by currently
+        // fetched dependencies. Thus we maintain a mapping from "name@spec" to
+        // a vector of `NodeDependency`s. When we will fetch the package - we
+        // will apply it to all dependencies that need it.
+        let fetches: HashMap<String, Vec<NodeDependency>> = HashMap::new();
+        let fetches = Arc::new(Mutex::new(fetches));
 
         let mut package_stream = package_stream
             .map(|dep: NodeDependency| {
-                self.nassun
-                    .resolve(format!("{}@{}", dep.name, dep.spec))
-                    .map_ok(move |p| (p, dep))
+                let fetches = fetches.clone();
+                let nassun = &self.nassun;
+                async move {
+                    let mut fetches = fetches.lock().await;
+                    let spec = format!("{}@{}", dep.name, dep.spec);
+                    if let Some(list) = fetches.get_mut(&spec) {
+                        list.push(dep);
+                        return Ok(None);
+                    } else {
+                        fetches.insert(spec.clone(), vec![dep]);
+                    }
+
+                    // Drop mutex as early as possible so that it isn't blocked
+                    // by the await below.
+                    drop(fetches);
+
+                    nassun
+                        .resolve(spec.clone())
+                        .map_ok(move |p| Some((p, spec)))
+                        .await
+                }
             })
             .buffer_unordered(self.parallelism)
             .ready_chunks(self.parallelism);
@@ -230,22 +260,28 @@ impl NodeMaintainer {
             // Order doesn't matter here: each node name is unique, so we
             // don't have to worry about races messing with placement.
             if let Some(packages) = package_stream.next().await {
+                let mut fetches = fetches.lock().await;
                 in_flight -= packages.len();
                 for res in packages {
-                    let (package, dep) = res?;
-
-                    if Self::satisfy_dependency(
-                        &mut self.graph,
-                        &dep,
-                    )? {
-                        continue;
+                    let package_and_deps = res?.map(|(package, spec)| {
+                        fetches.remove(&spec).map(|deps| (package, deps))
+                    }).flatten();
+                    if let Some((package, deps)) = package_and_deps {
+                        for dep in deps {
+                            if Self::satisfy_dependency(
+                                &mut self.graph,
+                                &dep,
+                            )? {
+                                continue;
+                            }
+                            q.push_back(Self::place_child(
+                                &mut self.graph,
+                                dep.node_idx,
+                                package.clone(),
+                                dep.dep_type,
+                            )?);
+                        }
                     }
-                    q.push_back(Self::place_child(
-                        &mut self.graph,
-                        dep.node_idx,
-                        package,
-                        dep.dep_type,
-                    )?);
                 }
 
                 // We sort the current queue so we consider more shallow
